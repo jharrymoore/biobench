@@ -11,6 +11,7 @@ import versioneer
 
 setup(
     name="biobench",
+    version="0.1",
     author="Harry Moore",
     author_email="jhm72@cam.ac.uk",
     description="A package for benchmarking organic machine learning forcefields",
@@ -31,7 +32,7 @@ setup(
     zip_safe=False,
     entry_points={
         "console_scripts": [
-            "biobench = biobench.entrypoint:main",
+            "biobench = biobench.biobench:main",
         ]
     },
 )
