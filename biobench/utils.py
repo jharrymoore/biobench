@@ -1,7 +1,7 @@
 import argparse
 import logging
 import sys
-from typing import Union
+from typing import Optional, Union
 
 
 def get_args() -> argparse.Namespace:
@@ -13,6 +13,9 @@ def get_args() -> argparse.Namespace:
     parser.add_argument("--data-path", required=False)
     parser.add_argument("--analyse", action="store_true")
     parser.add_argument("--replicas", type=int, default=1)
+    parser.add_argument("--output-dir", default=None)
+    parser.add_argument("--csv", default=None)
+    parser.add_argument("--n-gpu", type=int, default=1)
     return parser.parse_args()
 
 

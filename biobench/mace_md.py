@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-from typing import Optional
 
 
 @dataclass
@@ -12,7 +11,7 @@ class MaceMDCLI:
     model_path: str
     steps: int
     run_type: str = "md"
-    replicas: Optional[int] = None
+    replicas: int = 1
     resname: str = "LIG"
     decouple: bool = False
     padding: float = 0.0
@@ -30,4 +29,4 @@ class MaceMDCLI:
     --replicas {self.replicas} \\
     --padding {self.padding} \\
     --box_shape {self.box_shape} \\
-        """
+"""

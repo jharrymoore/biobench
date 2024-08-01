@@ -3,6 +3,7 @@ from rdkit import Chem
 from rdkit.Chem import AllChem
 import logging
 import shutil
+import mdtraj as md
 import tempfile
 from typing import Optional
 from urllib.request import urlretrieve
@@ -80,6 +81,7 @@ class DensityExperiment(Experiment):
         overwrite: bool,
         steps: int,
         n_procs: Optional[int] = None,
+        csv_file: Optional[str] = None,
     ):
         super().__init__(
             data_path=data_path,
@@ -92,6 +94,7 @@ class DensityExperiment(Experiment):
             steps=steps,
         )
         self.n_procs = n_procs
+        self.csv_file = csv_file
 
     def execute(self):
         if self.overwrite:
@@ -132,6 +135,29 @@ class DensityExperiment(Experiment):
             slurm_job.write_job_script()
             slurm_job.submit_job()
 
+    def analyse(self):
+        logging.info("Analysing density data...")
+        # implement analysis here
+        # read names and experimental values from csv file
+        molecules, exp_values = [], []
+        assert (
+            self.csv_file is not None
+        ), "CSV file must be provided, since analysis was called"
+        with open(self.csv_file, "r") as f:
+            data = f.readlines()
+        for line in data:
+            name, value = line.split(",")
+            molecules.append(name)
+            exp_values.append(float(value))
+
+        # loop over the output directories, compute densities
+        output_dirs = os.listdir(self.output_dir)
+        for direc in output_dirs:
+            traj = md.load(
+                os.path.join(self.output_dir, direc, "output.dcd"),
+                top=os.path.join(self.output_dir, direc, "output.pdb"),
+            )
+
 
 class SolvationExperiment(Experiment):
     def __init__(
@@ -145,6 +171,7 @@ class SolvationExperiment(Experiment):
         overwrite: bool,
         steps: int,
         replicas: int,
+        n_gpu: int,
         n_procs: Optional[int] = None,
     ):
         super().__init__(
@@ -159,6 +186,7 @@ class SolvationExperiment(Experiment):
         )
         self.replicas = replicas
         self.n_procs = n_procs
+        self.n_gpu = n_gpu
 
     def prepare_solvated_molecule(self, name: str) -> None:
         logging.debug(f"Preparing solvated molecule for {name}")
@@ -192,6 +220,7 @@ class SolvationExperiment(Experiment):
                 Chem.MolToPDBFile(
                     mol, os.path.join(self.output_dir, name, f"{name}.pdb")
                 )
+                self.prepare_solvated_molecule(name)
 
         return self.output_dir
 
@@ -211,8 +240,6 @@ class SolvationExperiment(Experiment):
             steps=self.steps,
             run_type="repex",
             replicas=self.replicas,
-            padding=1.2,
-            box_shape="dodecahedron",
             resname="UNL",
         )
 
@@ -224,7 +251,7 @@ class SolvationExperiment(Experiment):
                 partition=self.partition,
                 time=self.timelimit,
                 account=self.account,
-                gres="gpu:4",
+                n_gpu=self.n_gpu,
                 ntasks=self.replicas,
                 nodes=1,
                 mem="16G",

@@ -22,13 +22,17 @@ def main():
     if args.experiment == "density":
         config = Configuration(
             data_path=default_data_path if args.data_path is None else args.data_path,
-            output_dir=os.path.join(os.getcwd(), "density_calcs"),
+            output_dir=(
+                os.path.join(os.getcwd(), "density_calcs")
+                if args.output_dir is None
+                else args.output_dir
+            ),
             partition="ampere",
-            timelimit="36:0:0",
-            account="csanyi-sl2-gpu",
+            timelimit="1:0:0",
+            account="csanyi-sl3-gpu",
             overwrite=args.overwrite,
             model_path=args.model_path,
-            steps=500000,
+            steps=5000,
         )
         experiment = DensityExperiment(
             data_path=config.data_path,
@@ -61,6 +65,7 @@ def main():
             overwrite=config.overwrite,
             steps=config.steps,
             replicas=args.replicas,
+            n_gpu=args.n_gpu
         )
     else:
         raise NotImplementedError(f"Experiment {args.experiment} not implemented.")

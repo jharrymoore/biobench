@@ -11,7 +11,7 @@ class SlurmJob:
         time,
         account,
         partition,
-        gres,
+        n_gpu,
         ntasks,
         nodes,
         mem,
@@ -23,7 +23,7 @@ class SlurmJob:
         self.time = time
         self.account = account
         self.partition = partition
-        self.gres = gres
+        self.n_gpu = n_gpu
         self.ntasks = ntasks
         self.nodes = nodes
         self.mem = mem
@@ -31,9 +31,8 @@ class SlurmJob:
 
     def create_gpu_bind_string(self):
         idx_str = ""
-        n_gpu = int(self.gres.split(":")[1])
-        replicas_per_gpu = int(self.ntasks / n_gpu)
-        for i in range(n_gpu):
+        replicas_per_gpu = int(self.ntasks / self.n_gpu)
+        for i in range(self.n_gpu):
             idx_str += (str(i) + ",") * replicas_per_gpu
         return idx_str[:-1]
 
@@ -42,10 +41,10 @@ class SlurmJob:
         return f"""#!/bin/bash -l
 #SBATCH --time={self.time}
 #SBATCH --partition={self.partition}
-#SBATCH --gres={self.gres}
+#SBATCH --gres=gpu:{self.n_gpu}
 #SBATCH --account={self.account}
 #SBATCH --ntasks={self.ntasks}
-#SBATCH -N={self.nodes}
+#SBATCH --nodes={self.nodes}
 #SBATCH --mem={self.mem}
 
 source ~/.bashrc
@@ -67,7 +66,9 @@ conda activate mace-mlmm\n"""
         logging.info(f"Submitting job {self.name}...")
         current_cwd = os.getcwd()
         os.chdir(self.job_dir)
-        output = subprocess.run(f"sbatch {self.name}.sh", shell=True, check=True)
+        output = subprocess.run(
+            f"sbatch {self.name}.sh", shell=True, check=True, capture_output=True
+        )
         os.chdir(current_cwd)
         logging.info(f"Job {self.name} submitted with job id {output.stdout}")
-        self.job_id = output.stdout
+        self.job_id = output.stdout.strip()
