@@ -43,7 +43,6 @@ class SlurmParams:
 class SimulationParams:
     steps: int
     pressure: float
-    nl: str
     minimiser: str
     temp: float
     optimized_model: bool
