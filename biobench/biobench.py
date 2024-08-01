@@ -5,12 +5,10 @@ from biobench.config import Configuration
 from biobench.experiment import DensityExperiment, Experiment, SolvationExperiment
 from .utils import get_args, init_logging
 from enum import Enum
+from biobench.config import ValidationDataPaths
 import logging
 
 
-class ValidationDataPaths(Enum):
-    density = "https://drive.google.com/uc?id=18RurJW7n7dWYx3vKSZcuN9ejf_FuwdPo"
-    solvation = None
 
 
 def main():

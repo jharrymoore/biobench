@@ -1,28 +1,27 @@
 import subprocess
 import logging
 import os
+from pathlib import Path
+from typing import Optional
 
-from biobench.config import SlurmParams
+from biobench.config import ExecutionEnvironment, SlurmParams
 
 
-class SlurmJob:
+class Job:
     def __init__(
         self,
         name: str,
         work_dir: Path,
         command: str,
-        slurm_params: SlurmParams,
+        execution_environment: ExecutionEnvironment,
+        slurm_params: Optional[SlurmParams],
     ):
         self.name = name
-        self.work_dir = workdir
-        self.job_id = None
-        self.timelimit=slurm_params.timelimit
-        self.account = slurm_params.account
-        self.partition = slurm_params.partition
-        self.gpus =slurm_params.gpus
-        self.tasks = slurm_params.tasks
-        self.nodes = slurm_params.nodes
+        self.work_dir =work_dir
+        self.execution_environment = execution_environment
+        self.slurm_params = slurm_params
         self.command = command
+        self.job_id = None
 
     def create_gpu_bind_string(self):
         idx_str = ""
@@ -34,12 +33,12 @@ class SlurmJob:
     def create_slurm_header(self):
 
         return f"""#!/bin/bash -l
-#SBATCH --time={self.time}
-#SBATCH --partition={self.partition}
-#SBATCH --gres=gpu:{self.gpus}
-#SBATCH --account={self.account}
-#SBATCH --ntasks={self.tasks}
-#SBATCH --nodes={self.nodes}
+#SBATCH --time={self.slurm_params.timelimit}
+#SBATCH --partition={self.slurm_params.partition}
+#SBATCH --gres=gpu:{self.slurm_params.gpus}
+#SBATCH --account={self.slurm_params.account}
+#SBATCH --ntasks={self.slurm_params.tasks}
+#SBATCH --nodes={self.slurm_params.nodes}
 
 source ~/.bashrc
 conda activate mace-mlmm\n"""

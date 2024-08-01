@@ -1,6 +1,20 @@
 from dataclasses import dataclass
 from enum import Enum
 
+class ValidationDataPaths(Enum):
+    density = "https://drive.google.com/uc?id=18RurJW7n7dWYx3vKSZcuN9ejf_FuwdPo"
+    solvation = None
+
+@dataclass
+class Configuration:
+    data_path: str
+    output_dir: str
+    partition: str
+    timelimit: str
+    account: str
+    overwrite: bool
+    model_path: str
+    steps: int
 
 class ExecutionEnvironment(Enum):
     SLURM = 1
@@ -28,5 +42,9 @@ class SlurmParams:
 @dataclass
 class SimulationParams:
     steps: int
-    pressure: int
+    pressure: float
+    nl: str
+    minimiser: str
+    temp: float
+    optimized_model: bool
 

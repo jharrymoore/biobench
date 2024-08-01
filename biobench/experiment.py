@@ -11,16 +11,17 @@ from urllib.request import urlretrieve
 import tarfile
 from pdbfixer.pdbfixer import PDBFixer
 from biobench.mace_md import MaceMDCLI
-from biobench.slurm import SlurmJob
 from openmm import unit
 from openmm import app
 from result import Ok, Err, Result
 from pymbar import timeseries
 import logging
-from mace.models import MACE
+from mace.modules.models import MACE
 from copy import deepcopy
 from mace_cuda.models import EquivariantMACE
 from biobench.config import SlurmParams, ExecutionEnvironment, ExperimentResult, SimulationParams
+import mpiplus
+from mace_md.hybrid_md import PureSystem
 
 logger = logging.getLogger("BIOBENCH")
 
@@ -52,6 +53,7 @@ class Experiment:
         self.steps = steps
         self.execution_environment = execution_environment
         self.model = self.optimize_model() if optimize_model else model
+        self.model_path=os.path.join(self.workdir, "MACE.model")
 
     def download_data(self, path: str):
         # download data from url to a tmp directory
@@ -128,40 +130,62 @@ class DensityExperiment(Experiment):
         os.makedirs(self.output_dir, exist_ok=True)
         extract_dir = self.prepare_data()
 
-        for file in os.listdir(extract_dir):
-            logging.info(f"Processing file: {file}")
-            xyz_file = [
-                f
-                for f in os.listdir(os.path.join(extract_dir, file))
-                if f.endswith(".xyz")
-            ][0]
-            command = MaceMDCLI(
-                pressure=1.0,
-                temp=298.0,
-                file=xyz_file,
-                ml_mol=xyz_file,
-                output_dir="mace_md_density",
+        def _run_mace_md(directory:str):
+            file = [f for f in os.listdir(directory) if f.endswith(".xyz")]
+            assert len(file) == 1, "More than one xyz file found"
+            file = file[0]
+            system = PureSystem(
+                file=file,
                 model_path=self.model_path,
-                steps=self.steps,
+                output_dir=os.path.join(directory, "mace_md_liquid"),
+                temperature=self.simulation_params.temp,
+                minimiser=self.simulation_params.minimiser,
+                system_id=directory,
+                nl=self.simulation_params.nl,
+                optimized_model=self.simulation_params.optimized_model,
             )
-            cli_string = command.create_cli_string()
-            if self.execution_environment == ExecutionEnvironment.LOCAL:
+
+
+            system.propagate(self.simulation_params.steps)
+        
+        # distribute simulations across MPI ranks
+        mpiplus.distribute(_run_mace_md, list(os.listdir(extract_dir)))
+
+
+        # for file in os.listdir(extract_dir):
+        #     logging.info(f"Processing file: {file}")
+        #     xyz_file = [
+        #         f
+        #         for f in os.listdir(os.path.join(extract_dir, file))
+        #         if f.endswith(".xyz")
+        #     ][0]
+            # command = MaceMDCLI(
+            #     pressure=1.0,
+            #     temp=298.0,
+            #     file=xyz_file,
+            #     ml_mol=xyz_file,
+            #     output_dir="mace_md_density",
+            #     model_path=self.model_path,
+            #     steps=self.steps,
+            # )
+            # cli_string = command.create_cli_string()
+            # if self.execution_environment == ExecutionEnvironment.LOCAL:
                 #TODO: run local execution_environment
-                pass
-            else:
-                slurm_job = SlurmJob(
-                    name=file,
-                    work_dir=os.path.join(extract_dir, file),
-                    slurm_params=self.slurm_params,
-                    command=cli_string,
-                )
-                slurm_job.write_job_script()
-                slurm_job.submit_job()
-
-
+                # pass
+            # else:
+            #     slurm_job = SlurmJob(
+            #         name=file,
+            #         work_dir=os.path.join(extract_dir, file),
+            #         slurm_params=self.slurm_params,
+            #         command=cli_string,
+            #     )
+            #     slurm_job.write_job_script()
+            #     slurm_job.submit_job()
+            #
+            #
             # check execution results
-            if not os.path.exists(os.path.join(extract_dir, file, "output.dcd")):
-                return Err("biobench execution failed")
+        # if not os.path.exists(os.path.join(extract_dir, file, "output.dcd")):
+        #     return Err("biobench execution failed")
         return Ok(None)
 
     def analyse(self) -> Result[List[ExperimentResult], str]:
