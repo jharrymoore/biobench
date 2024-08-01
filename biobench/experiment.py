@@ -1,41 +1,57 @@
 import os
+from pathlib import Path
 from rdkit import Chem
 from rdkit.Chem import AllChem
 import logging
 import shutil
 import mdtraj as md
 import tempfile
-from typing import Optional
+from typing import List, Optional
 from urllib.request import urlretrieve
 import tarfile
 from pdbfixer.pdbfixer import PDBFixer
-
 from biobench.mace_md import MaceMDCLI
 from biobench.slurm import SlurmJob
 from openmm import unit
 from openmm import app
+from result import Ok, Err, Result
+from pymbar import timeseries
+import logging
+from mace.models import MACE
+from copy import deepcopy
+from mace_cuda.models import EquivariantMACE
+from biobench.config import SlurmParams, ExecutionEnvironment, ExperimentResult, SimulationParams
 
+logger = logging.getLogger("BIOBENCH")
 
 class Experiment:
+    data_path: str
+    output_dir: str
+    model: MACE
+    partition: str
+    slurm_params: Optional[SlurmParams]
+
     def __init__(
         self,
         data_path: str,
-        output_dir: str,
-        model_path: str,
-        partition: str,
-        timelimit: str,
-        account: str,
+        model: MACE,
         overwrite: bool,
         steps: int,
+        optimize_model: bool,
+        execution_environment: ExecutionEnvironment,
+        state_dict: Optional[Path] = None,
+        slurm_params: Optional[SlurmParams] = None,
+
     ):
+        self.workdir = tempfile.mkdtemp()
         self.data_path = data_path
-        self.output_dir = output_dir
-        self.model_path = model_path
-        self.partition = partition
-        self.timelimit = timelimit
-        self.account = account
+        if state_dict is not None:
+            self.model.load_state_dict(state_dict)
+        self.slurm_params = slurm_params
         self.overwrite = overwrite
         self.steps = steps
+        self.execution_environment = execution_environment
+        self.model = self.optimize_model() if optimize_model else model
 
     def download_data(self, path: str):
         # download data from url to a tmp directory
@@ -44,22 +60,32 @@ class Experiment:
         file_size = os.path.getsize(os.path.join(path, "data.tar.gz"))
         logging.info(f"Downloaded data size: {file_size} bytes")
 
-    def unzip_data(self, path: str):
-        data_file = os.listdir(path)[0]
+
+    def optimize_model(self) -> EquivariantMACE:
+        logging.info("Converting model to CUDA implementation...")
+        # check whether we are L=0 or L=1
+        if self.model.hidden_irreps.l == 0:
+            raise NotImplementedError("L=0 models are not currently torch scriptable")
+        elif self.model.hidden_irreps.l == 1:
+            return EquivariantMACE(deepcopy(self.model))
+            
+        
+    def unzip_data(self,workdir:st):
+        data_file = os.listdir(workdir)[0]
         assert data_file.endswith(".tar.gz"), "Data file must be a tar.gz file."
         logging.info("Extracting tar.gz file...")
-        with tarfile.open(os.path.join(path, data_file), "r:gz") as tar_ref:
-            tar_ref.extractall(path)
-        os.remove(os.path.join(path, "data.tar.gz"))
-        extract_dir = os.path.join(path, os.listdir(path)[0])
+        with tarfile.open(os.path.join(workdir, data_file), "r:gz") as tar_ref:
+            tar_ref.extractall(workdir)
+        os.remove(os.path.join(workdir, "data.tar.gz"))
+        extract_dir = os.path.join(workdir, os.listdir(workdir)[0])
         n_files = len(os.listdir(extract_dir))
         logging.info(f"Extracted {n_files} files.")
         return extract_dir
 
     def prepare_data(self):
         logging.info("Preparing data...")
-        self.download_data(self.output_dir)
-        extract_dir = self.unzip_data(self.output_dir)
+        self.download_data(self.workdir)
+        extract_dir = self.unzip_data(self.workdir)
         return extract_dir
 
     def execute(self):
@@ -73,30 +99,29 @@ class DensityExperiment(Experiment):
     def __init__(
         self,
         data_path: str,
-        output_dir: str,
-        model_path: str,
-        partition: str,
-        timelimit: str,
-        account: str,
+        model: MACE,
         overwrite: bool,
         steps: int,
-        n_procs: Optional[int] = None,
+        execution_environment: ExecutionEnvironment,
+        simulation_params: SimulationParams,
         csv_file: Optional[str] = None,
+        slurm_params: Optional[SlurmParams] = None,
+        optimize_model: bool = True,
     ):
+        if execution_environment == ExecutionEnvironment.SLURM:
+            assert slurm_params is not None, "Slurm job paramets not provided"
         super().__init__(
             data_path=data_path,
-            output_dir=output_dir,
-            model_path=model_path,
-            partition=partition,
-            timelimit=timelimit,
-            account=account,
+            model=model,
             overwrite=overwrite,
             steps=steps,
+            execution_environment=execution_environment,
+            optimize_model=optimize_model
         )
-        self.n_procs = n_procs
         self.csv_file = csv_file
+        self.simulation_params = simulation_params
 
-    def execute(self):
+    def execute(self) -> Result[None, str]:
         if self.overwrite:
             logging.info("Overwriting existing data...")
             shutil.rmtree(self.output_dir)
@@ -120,22 +145,26 @@ class DensityExperiment(Experiment):
                 steps=self.steps,
             )
             cli_string = command.create_cli_string()
-            slurm_job = SlurmJob(
-                name=file,
-                job_dir=os.path.join(extract_dir, file),
-                partition=self.partition,
-                time=self.timelimit,
-                account=self.account,
-                gres="gpu:1",
-                ntasks=1,
-                nodes=1,
-                mem="16G",
-                command=cli_string,
-            )
-            slurm_job.write_job_script()
-            slurm_job.submit_job()
+            if self.execution_environment == ExecutionEnvironment.LOCAL:
+                #TODO: run local execution_environment
+                pass
+            else:
+                slurm_job = SlurmJob(
+                    name=file,
+                    work_dir=os.path.join(extract_dir, file),
+                    slurm_params=self.slurm_params,
+                    command=cli_string,
+                )
+                slurm_job.write_job_script()
+                slurm_job.submit_job()
 
-    def analyse(self):
+
+            # check execution results
+            if not os.path.exists(os.path.join(extract_dir, file, "output.dcd")):
+                return Err("biobench execution failed")
+        return Ok(None)
+
+    def analyse(self) -> Result[List[ExperimentResult], str]:
         logging.info("Analysing density data...")
         # implement analysis here
         # read names and experimental values from csv file
@@ -152,11 +181,24 @@ class DensityExperiment(Experiment):
 
         # loop over the output directories, compute densities
         output_dirs = os.listdir(self.output_dir)
+        results = []
         for direc in output_dirs:
             traj = md.load(
                 os.path.join(self.output_dir, direc, "output.dcd"),
                 top=os.path.join(self.output_dir, direc, "output.pdb"),
             )
+            density = md.density(traj) / 1000
+            t0, g, Neff_max = timeseries.detect_equilibration(A_t) # compute indices of uncorrelated timeseries
+            density_equil = density[t0:]
+            logger.debug(f"Detected equilibration at from {t0} of {len(density)}")
+            results.append(
+                ExperimentResult(
+                    system_name=direc,
+                    result=density_equil.mean(),
+                    experimental=exp_values[molecules.index(direc)],
+                )
+            )
+
 
 
 class SolvationExperiment(Experiment):

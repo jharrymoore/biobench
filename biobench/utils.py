@@ -19,9 +19,9 @@ def get_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def init_logging(level: Union[int, str] = logging.INFO):
+def init_logging(level: Union[int, str] = logging.INFO) -> None:
 
-    logger = logging.getLogger()
+    logger = logging.getLogger("BIOBENCH")
     logger.setLevel(level)
 
     formatter = logging.Formatter(
@@ -32,3 +32,26 @@ def init_logging(level: Union[int, str] = logging.INFO):
     ch = logging.StreamHandler(stream=sys.stdout)
     ch.setFormatter(formatter)
     logger.addHandler(ch)
+
+
+
+
+def which(program: str) -> Optional[str]:
+    import os
+
+    def is_exe(fpath):
+        return os.path.isfile(fpath) and os.access(fpath, os.X_OK)
+
+    fpath, _ = os.path.split(program)
+    if fpath:
+        if is_exe(program):
+            return program
+    else:
+        for path in os.environ["PATH"].split(os.pathsep):
+            path = path.strip('"')
+            exe_file = os.path.join(path, program)
+            if is_exe(exe_file):
+                return exe_file
+
+    return None
+
