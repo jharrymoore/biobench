@@ -68,7 +68,7 @@ class Experiment:
     def make_tmpdir(self) -> str:
         return tempfile.mkdtemp()
 
-    def download_data(self,):
+    def download_data(self):
         # download data from url to a tmp directory
         logging.info(f"Downloading data from {self.data_path}")
         urlretrieve(self.data_path, os.path.join(self.workdir, "data.tar.gz"))
