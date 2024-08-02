@@ -39,7 +39,6 @@ class Experiment:
         data_path: str,
         model_path: str,
         overwrite: bool,
-        steps: int,
         optimize_model: bool,
         execution_environment: ExecutionEnvironment,
         run_max_n: int,
@@ -47,7 +46,7 @@ class Experiment:
         slurm_params: Optional[SlurmParams] = None,
 
     ):
-        self.workdir = tempfile.mkdtemp()
+        self.workdir = self.make_tmpdir()
         self.data_path = data_path
         self.model = torch.load(model_path)
         self.model_path=model_path
@@ -55,7 +54,6 @@ class Experiment:
             self.model.load_state_dict(state_dict)
         self.slurm_params = slurm_params
         self.overwrite = overwrite
-        self.steps = steps
         self.execution_environment = execution_environment
         self.run_max_n = run_max_n
         if optimize_model:
@@ -66,6 +64,9 @@ class Experiment:
                 case Err(val):
                     logger.critical(f"Error in converting model to cuda kernels: {val}. Model will not be run with optimizations")
                     
+    @mpiplus.on_single_node(rank=0, broadcast_result=True)
+    def make_tmpdir(self) -> str:
+        return tempfile.mkdtemp()
 
     def download_data(self,):
         # download data from url to a tmp directory
@@ -75,18 +76,26 @@ class Experiment:
         logging.info(f"Downloaded data size: {file_size} bytes")
 
 
-    def unzip_data(self, workdir: str):
-        data_file = os.listdir(workdir)[0]
+    def unzip_data(self):
+        data_file = os.listdir(self.workdir)[0]
         assert data_file.endswith(".tar.gz"), "Data file must be a tar.gz file."
         logging.info("Extracting tar.gz file...")
-        with tarfile.open(os.path.join(workdir, data_file), "r:gz") as tar_ref:
-            tar_ref.extractall(workdir)
-        os.remove(os.path.join(workdir, "data.tar.gz"))
-        extract_dir = os.path.join(workdir, os.listdir(workdir)[0])
-        n_files = len(os.listdir(extract_dir))
-        logging.info(f"Extracted {n_files} files.")
+        with tarfile.open(os.path.join(self.workdir, data_file), "r:gz") as tar_ref:
+            tar_ref.extractall(self.workdir)
+        os.remove(os.path.join(self.workdir, "data.tar.gz"))
+        extract_dir = os.path.join(self.workdir, os.listdir(self.workdir)[0])
+
+        # move the contents of the extract dir to the workdir
+        shutil.move(extract_dir, os.path.join(self.workdir, "data"))
+        extract_dir =  os.path.join(self.workdir, "data")
+        extracted_files = os.listdir(extract_dir)
+        logging.info(f"Extracted {len(extracted_files)} files.")
         if self.run_max_n != -1:
-            for dir in os.listdir()
+            for dir in extracted_files[self.run_max_n:]:
+                shutil.rmtree(os.path.join(extract_dir, dir))
+                n_remaining = len(os.listdir(extract_dir))
+                logger.info(f"Remaining files in work dir: {n_remaining}")
+
         return extract_dir
 
     def optimize_model(self) -> Result[Tuple[EquivariantMACE, str],str]:
@@ -103,6 +112,7 @@ class Experiment:
             return Ok((model, output_file))
             
         
+    @mpiplus.on_single_node(rank=0, broadcast_result=True)
     def prepare_data(self):
         logging.info("Preparing data...")
         self.download_data()
@@ -122,7 +132,6 @@ class DensityExperiment(Experiment):
         data_path: str,
         model_path: str,
         overwrite: bool,
-        steps: int,
         execution_environment: ExecutionEnvironment,
         simulation_params: SimulationParams,
         csv_file:str, 
@@ -136,7 +145,6 @@ class DensityExperiment(Experiment):
             data_path=data_path,
             model_path=model_path,
             overwrite=overwrite,
-            steps=steps,
             execution_environment=execution_environment,
             optimize_model=optimize_model,
             run_max_n=run_max_n,
@@ -153,10 +161,10 @@ class DensityExperiment(Experiment):
 
         def _run_mace_md(directory:str):
             local_mpi_rank = os.environ.get("OMPI_COMM_WORLD_RANK")
-            print(f"Running simulation { directory} on rank {local_mpi_rank}")
             full_work_dir = os.path.join(self.workdir, extract_dir, directory)
-            file = [os.path.join(self.workdir, extract_dir, directory, f) for f in os.listdir(os.path.join(self.workdir, extract_dir, directory)) if f.endswith(".xyz")]
-            assert len(file) == 1, "More than one xyz file found"
+            print(f"Running simulation {full_work_dir} on rank {local_mpi_rank}")
+            file = [os.path.join(full_work_dir, f) for f in os.listdir(os.path.join(full_work_dir)) if f.endswith(".xyz")]
+            assert len(file) == 1, f"Expecting exactly 1 .xyz file, found {len(file)} "
             file = file[0]
             system = PureSystem(
                 file=file,
@@ -170,29 +178,29 @@ class DensityExperiment(Experiment):
 
             system.propagate(
                 self.simulation_params.steps,
-                output_file=os.path.join(os.path.dirname(file), "liquid_md"),
-                interval=1000,
+                interval=100,
                 restart=False
             )
         
         # distribute simulations across MPI ranks
-        mpiplus.distribute(_run_mace_md, list(os.listdir(extract_dir)))
+        mpiplus.distribute(_run_mace_md, list(os.listdir(extract_dir)), sync_nodes=True)
 
         return Ok(None)
 
     def analyse(self, exp_key: str, mol_name_key: str) -> Result[List[ExperimentResult], str]:
         logging.info("Analysing density data...")
         df = pd.read_csv(self.csv_file)
-        output_dirs = os.listdir(self.output_dir)
+        data_dir=os.path.join(self.workdir, "data")
+        output_dirs = os.listdir(data_dir)
         results = []
         # these must match molecule names in the dataframe
         for direc in output_dirs:
             traj = md.load(
-                os.path.join(self.output_dir, direc, "output.dcd"),
-                top=os.path.join(self.output_dir, direc, "output.pdb"),
+                os.path.join(data_dir, direc, "mace_md_liquid/output.dcd"),
+                top=os.path.join(data_dir, direc, "mace_md_liquid/output.pdb"),
             )
             density = md.density(traj) / 1000
-            t0, g, Neff_max = timeseries.detect_equilibration(A_t) # compute indices of uncorrelated timeseries
+            t0, g, Neff_max = timeseries.detect_equilibration(density) # compute indices of uncorrelated timeseries
             density_equil = density[t0:]
             logger.debug(f"Detected equilibration at {t0} of {len(density)}")
             logger.debug(f"Density for compound {direc}={density_equil.mean()}")
@@ -203,6 +211,7 @@ class DensityExperiment(Experiment):
                     experimental=float(df[df[mol_name_key] == direc][exp_key]),
                 )
             )
+        return Ok(results)
 
 class SolvationExperiment(Experiment):
     def __init__(
