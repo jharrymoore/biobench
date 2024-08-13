@@ -3,6 +3,7 @@ import pandas as pd
 from pathlib import Path
 from rdkit import Chem
 from rdkit.Chem import AllChem
+import numpy as np
 import logging
 import shutil
 import mdtraj as md
@@ -20,12 +21,19 @@ import logging
 from mace.modules.models import MACE
 from copy import deepcopy
 from cuda_mace.models import EquivariantMACE
-from biobench.config import SlurmParams, ExecutionEnvironment, ExperimentResult, SimulationParams
+from biobench.config import (
+    SlurmParams,
+    ExecutionEnvironment,
+    ExperimentResult,
+    SimulationParams,
+)
 import mpiplus
 from mace_md.hybrid_md import PureSystem
 import torch
+from pubchemprops.pubchemprops import get_second_layer_props
 
 logger = logging.getLogger("BIOBENCH")
+
 
 class Experiment:
     data_path: str
@@ -44,12 +52,11 @@ class Experiment:
         run_max_n: int,
         state_dict: Optional[str] = None,
         slurm_params: Optional[SlurmParams] = None,
-
     ):
         self.workdir = self.make_tmpdir()
         self.data_path = data_path
         self.model = torch.load(model_path)
-        self.model_path=model_path
+        self.model_path = model_path
         if state_dict is not None:
             self.model.load_state_dict(state_dict)
         self.slurm_params = slurm_params
@@ -62,8 +69,10 @@ class Experiment:
                     logger.info("Successfully equipped model with CUDA kernels")
                     self.model, self.model_path = model, path
                 case Err(val):
-                    logger.critical(f"Error in converting model to cuda kernels: {val}. Model will not be run with optimizations")
-                    
+                    logger.critical(
+                        f"Error in converting model to cuda kernels: {val}. Model will not be run with optimizations"
+                    )
+
     @mpiplus.on_single_node(rank=0, broadcast_result=True)
     def make_tmpdir(self) -> str:
         return tempfile.mkdtemp()
@@ -74,7 +83,6 @@ class Experiment:
         urlretrieve(self.data_path, os.path.join(self.workdir, "data.tar.gz"))
         file_size = os.path.getsize(os.path.join(self.workdir, "data.tar.gz"))
         logging.info(f"Downloaded data size: {file_size} bytes")
-
 
     def unzip_data(self):
         data_file = os.listdir(self.workdir)[0]
@@ -87,18 +95,18 @@ class Experiment:
 
         # move the contents of the extract dir to the workdir
         shutil.move(extract_dir, os.path.join(self.workdir, "data"))
-        extract_dir =  os.path.join(self.workdir, "data")
+        extract_dir = os.path.join(self.workdir, "data")
         extracted_files = os.listdir(extract_dir)
         logging.info(f"Extracted {len(extracted_files)} files.")
         if self.run_max_n != -1:
-            for dir in extracted_files[self.run_max_n:]:
+            for dir in extracted_files[self.run_max_n :]:
                 shutil.rmtree(os.path.join(extract_dir, dir))
                 n_remaining = len(os.listdir(extract_dir))
                 logger.info(f"Remaining files in work dir: {n_remaining}")
 
         return extract_dir
 
-    def optimize_model(self) -> Result[Tuple[EquivariantMACE, str],str]:
+    def optimize_model(self) -> Result[Tuple[EquivariantMACE, str], str]:
         logging.info("Converting model to CUDA implementation...")
         # check whether we are L=0 or L=1
         model_lmax = self.model.interactions[1].node_feats_irreps.lmax
@@ -110,8 +118,7 @@ class Experiment:
             output_file = os.path.join(self.workdir, "mace_opt.model")
             torch.save(model, output_file)
             return Ok((model, output_file))
-            
-        
+
     @mpiplus.on_single_node(rank=0, broadcast_result=True)
     def prepare_data(self):
         logging.info("Preparing data...")
@@ -134,13 +141,13 @@ class DensityExperiment(Experiment):
         overwrite: bool,
         execution_environment: ExecutionEnvironment,
         simulation_params: SimulationParams,
-        csv_file:str, 
+        csv_file: str,
         slurm_params: Optional[SlurmParams] = None,
         optimize_model: bool = True,
-        run_max_n: int = -1
+        run_max_n: int = -1,
     ):
         if execution_environment == ExecutionEnvironment.SLURM:
-            assert slurm_params is not None, "Slurm job paramets not provided"
+            assert slurm_params is not None, "Slurm job parameters not provided"
         super().__init__(
             data_path=data_path,
             model_path=model_path,
@@ -152,6 +159,34 @@ class DensityExperiment(Experiment):
         self.csv_file = csv_file
         self.simulation_params = simulation_params
 
+    def _get_boiling_point(self, compound: str) -> Optional[float]:
+        """
+        Get the boiling point of a compound from the pubchemprops database
+        Returns:
+            float: the boiling point in Kelvin
+        """
+        try:
+            bp = get_second_layer_props(compound, ["Boiling Point"]).get(
+                "Boiling Point"
+            )
+            # this is a dictionary of results - average the values
+            bp_values = []
+            for result in bp:
+                raw_str = result["Value"]["StringWithMarkup"][0]["String"].strip()
+                val = raw_str.split()[0]
+                if raw_str[-1] == "F":
+                    # convert farenheit to Kelvin
+                    bp_values.append((5 / 9) * (float(val) + 459.67))
+                elif raw_str[-1] == "C":
+                    bp_values.append(float(val) + 273.15)
+                elif raw_str[-1] == "K":
+                    bp_values.append(float(val))
+
+            return np.mean(bp_values)
+        except Exception as e:
+            logger.error(f"Error in fetching boiling point for {compound}: {e}")
+            return None
+
     def execute(self) -> Result[None, str]:
         # if self.overwrite:
         #     logging.info("Overwriting existing data...")
@@ -159,38 +194,53 @@ class DensityExperiment(Experiment):
         # os.makedirs(self.workdir, exist_ok=True)
         extract_dir = self.prepare_data()
 
-        def _run_mace_md(directory:str):
+        def _run_mace_md(directory: str):
             local_mpi_rank = os.environ.get("OMPI_COMM_WORLD_RANK")
             full_work_dir = os.path.join(self.workdir, extract_dir, directory)
             print(f"Running simulation {full_work_dir} on rank {local_mpi_rank}")
-            file = [os.path.join(full_work_dir, f) for f in os.listdir(os.path.join(full_work_dir)) if f.endswith(".xyz")]
+            file = [
+                os.path.join(full_work_dir, f)
+                for f in os.listdir(os.path.join(full_work_dir))
+                if f.endswith(".xyz")
+            ]
             assert len(file) == 1, f"Expecting exactly 1 .xyz file, found {len(file)} "
             file = file[0]
+            boiling_point = self._get_boiling_point(directory)
+            if boiling_point is None:
+                logger.warning(
+                    f"Boiling point not found for {directory}.  Simulation will be run at {self.simulation_params.temp}K"
+                )
+                temp = self.simulation_params.temp
+            elif boiling_point > self.simulation_params.temp + 10:
+                temp = self.simulation_params.temp
+            else:
+                temp = boiling_point - 10
+
+            logger.info(f"Running simulation for {directory} at {temp}K")
+
             system = PureSystem(
                 file=file,
                 model_path=self.model_path,
-                output_dir=os.path.join(full_work_dir,  "mace_md_liquid"),
-                temperature=self.simulation_params.temp,
+                output_dir=os.path.join(full_work_dir, "mace_md_liquid"),
+                # note overriding default temperature
+                temperature=temp,
                 minimiser=self.simulation_params.minimiser,
                 optimized_model=self.simulation_params.optimized_model,
             )
 
+            system.propagate(self.simulation_params.steps, interval=100, restart=False)
 
-            system.propagate(
-                self.simulation_params.steps,
-                interval=100,
-                restart=False
-            )
-        
         # distribute simulations across MPI ranks
         mpiplus.distribute(_run_mace_md, list(os.listdir(extract_dir)), sync_nodes=True)
 
         return Ok(None)
 
-    def analyse(self, exp_key: str, mol_name_key: str) -> Result[List[ExperimentResult], str]:
+    def analyse(
+        self, exp_key: str, mol_name_key: str
+    ) -> Result[List[ExperimentResult], str]:
         logging.info("Analysing density data...")
         df = pd.read_csv(self.csv_file)
-        data_dir=os.path.join(self.workdir, "data")
+        data_dir = os.path.join(self.workdir, "data")
         output_dirs = os.listdir(data_dir)
         results = []
         # these must match molecule names in the dataframe
@@ -200,7 +250,9 @@ class DensityExperiment(Experiment):
                 top=os.path.join(data_dir, direc, "mace_md_liquid/output.pdb"),
             )
             density = md.density(traj) / 1000
-            t0, g, Neff_max = timeseries.detect_equilibration(density) # compute indices of uncorrelated timeseries
+            t0, g, Neff_max = timeseries.detect_equilibration(
+                density
+            )  # compute indices of uncorrelated timeseries
             density_equil = density[t0:]
             logger.debug(f"Detected equilibration at {t0} of {len(density)}")
             logger.debug(f"Density for compound {direc}={density_equil.mean()}")
@@ -212,6 +264,7 @@ class DensityExperiment(Experiment):
                 )
             )
         return Ok(results)
+
 
 class SolvationExperiment(Experiment):
     def __init__(
